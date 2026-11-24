@@ -5,11 +5,20 @@
  * Everything lives under one versioned key so the format can be migrated later.
  */
 
-import { newCardFields } from './scheduler.js';
+import { DEFAULT_RETENTION, clampRetention } from './scheduler.js';
+import { migrateCard } from './migrate.js';
 import { sampleData } from './sampleDeck.js';
 
+// The key name stays "flashcards.v1" for continuity; the format version is inside the data.
 export const STORAGE_KEY = 'flashcards.v1';
-export const DATA_VERSION = 1;
+/** Before migrating older (SM-2) data, a copy of the original is kept under this key. */
+export const PRE_FSRS_BACKUP_KEY = 'flashcards.v1.pre-fsrs-backup';
+/**
+ * Data format version:
+ *   1 = app Versions 1–2 (SM-2 cards)
+ *   2 = app Version 3 (FSRS cards, target retention setting)
+ */
+export const DATA_VERSION = 2;
 
 /** Short random id like "d_k3j9x2ab". */
 export function uid(prefix) {
@@ -17,7 +26,7 @@ export function uid(prefix) {
 }
 
 /** Default settings for a fresh install. */
-export const defaultSettings = { theme: 'system', newCardsPerDay: 20 };
+export const defaultSettings = { theme: 'system', newCardsPerDay: 20, targetRetention: DEFAULT_RETENTION };
 
 /** Empty data shell. */
 export function emptyData() {
@@ -39,7 +48,16 @@ export function loadData() {
   if (raw == null) return { data: sampleData(), error: null };
 
   try {
-    return { data: validateData(JSON.parse(raw)), error: null };
+    const parsed = JSON.parse(raw);
+    // Upgrading from SM-2 data: keep an untouched copy first (best effort; skipped if storage is full).
+    if (!(parsed.version >= 2)) {
+      try {
+        if (localStorage.getItem(PRE_FSRS_BACKUP_KEY) == null) localStorage.setItem(PRE_FSRS_BACKUP_KEY, raw);
+      } catch {
+        /* ignore */
+      }
+    }
+    return { data: validateData(parsed), error: null };
   } catch (e) {
     // Keep the corrupt copy so nothing is lost permanently.
     try {
@@ -62,10 +80,12 @@ export function saveData(data) {
 }
 
 /**
- * Check that an object looks like our data format and fill in any missing
- * fields with defaults. Throws an Error with a readable message if invalid.
+ * Check that an object looks like our data format, fill in any missing
+ * fields with defaults, and migrate older formats (SM-2 cards → FSRS).
+ * Works for both localStorage data and imported backups.
+ * Throws an Error with a readable message if invalid.
  */
-export function validateData(input) {
+export function validateData(input, now = Date.now()) {
   if (!input || typeof input !== 'object') throw new Error('File is not a flashcard backup.');
   if (!Array.isArray(input.decks) || !Array.isArray(input.cards)) {
     throw new Error('Backup is missing "decks" or "cards".');
@@ -88,35 +108,19 @@ export function validateData(input) {
 
   const cards = input.cards
     .filter((c) => c && isStr(c.id) && deckIds.has(c.deckId) && isStr(c.front) && isStr(c.back))
-    .map((c) => normalizeCard(c));
+    .map((c) => migrateCard(c, now));
+
+  const settings = { ...defaultSettings, ...(input.settings || {}) };
+  settings.targetRetention = clampRetention(settings.targetRetention);
+  const perDay = Number(settings.newCardsPerDay);
+  settings.newCardsPerDay = Number.isFinite(perDay) ? Math.min(9999, Math.max(0, Math.round(perDay))) : defaultSettings.newCardsPerDay;
 
   return {
     version: DATA_VERSION,
-    settings: { ...defaultSettings, ...(input.settings || {}) },
+    settings,
     decks,
     cards,
     newCardsStudied: input.newCardsStudied && typeof input.newCardsStudied === 'object' ? input.newCardsStudied : {},
-  };
-}
-
-/** Fill missing/invalid scheduling fields on a card with defaults. */
-function normalizeCard(c) {
-  const defaults = newCardFields(Number(c.createdAt) || Date.now());
-  const num = (v, d) => (Number.isFinite(v) ? v : d);
-  const states = ['new', 'learning', 'review', 'relearning'];
-  return {
-    id: c.id,
-    deckId: c.deckId,
-    front: c.front,
-    back: c.back,
-    createdAt: num(c.createdAt, Date.now()),
-    state: states.includes(c.state) ? c.state : 'new',
-    due: num(c.due, defaults.due),
-    interval: num(c.interval, 0),
-    ease: num(c.ease, defaults.ease),
-    step: num(c.step, 0),
-    reps: num(c.reps, 0),
-    lapses: num(c.lapses, 0),
   };
 }
 

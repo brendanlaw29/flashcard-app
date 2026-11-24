@@ -13,8 +13,8 @@ const BUTTONS = [
   { rating: EASY, label: 'Easy', color: 'text-sky-600 dark:text-sky-400' },
 ];
 
-export default function RatingButtons({ card, now, onRate }) {
-  const intervals = previewIntervals(card, now);
+export default function RatingButtons({ card, now, retention, onRate }) {
+  const intervals = previewIntervals(card, now, { retention });
 
   return (
     <div className="grid grid-cols-4 gap-2">

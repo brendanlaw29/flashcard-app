@@ -71,7 +71,10 @@ export default function Home({ onOpenDeck, onStudy }) {
                     {deck.total} {deck.total === 1 ? 'card' : 'cards'}
                   </span>
                 </button>
-                <DueCounts counts={deck.due} className="hidden sm:inline-flex" />
+                {/* Wrapper hides the counts on phones (DueCounts sets its own display class). */}
+                <span className="hidden sm:inline-flex">
+                  <DueCounts counts={deck.due} />
+                </span>
                 <button className="btn-secondary" disabled={!deck.due.total} onClick={() => onStudy(deck.id)}>
                   Study{deck.due.total ? ` (${deck.due.total})` : ''}
                 </button>

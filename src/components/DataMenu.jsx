@@ -33,10 +33,10 @@ export default function DataMenu() {
 
   return (
     <>
-      <button className="btn-ghost" onClick={() => downloadBackup(state, dayKey(Date.now()))} title="Download a JSON backup">
+      <button className="btn-ghost px-2 sm:px-3.5" onClick={() => downloadBackup(state, dayKey(Date.now()))} title="Download a JSON backup">
         Export
       </button>
-      <button className="btn-ghost" onClick={() => fileInput.current.click()} title="Restore from a JSON backup">
+      <button className="btn-ghost px-2 sm:px-3.5" onClick={() => fileInput.current.click()} title="Restore from a JSON backup">
         Import
       </button>
       <input ref={fileInput} type="file" accept="application/json,.json" className="hidden" onChange={onFile} />

@@ -1,7 +1,8 @@
-# Flashcard App — Requirements (Version 1 + Version 2)
+# Flashcard App — Requirements (Versions 1–3)
 
 A modern, local-first flashcard web app with Anki-style spaced repetition.
 Version 2 adds a study-direction setting plus Quizlet-style **Learn** and **Practice Test** modes (see §8).
+Version 3 Part A replaces SM-2 with **FSRS** (via `ts-fsrs`) and adds a Target Retention setting (see §9).
 No backend, no database, no accounts. All data lives in the browser.
 
 ---
@@ -33,7 +34,8 @@ No backend, no database, no accounts. All data lives in the browser.
 | State | React `useReducer` + Context, persisted to `localStorage` | No external state library needed |
 | Storage | Browser `localStorage` (single versioned JSON key) | No database setup |
 | Testing | **Vitest** for the logic in `src/lib` | The SRS algorithm is the one place bugs hurt most |
-| Dependencies | `react`, `react-dom`, `vite`, `@vitejs/plugin-react`, `tailwindcss`, `@tailwindcss/vite`, `vitest` | Nothing else |
+| Scheduling | **ts-fsrs** (v3+) | Official FSRS implementation; replaces the hand-written SM-2 |
+| Dependencies | `react`, `react-dom`, `ts-fsrs`, `vite`, `@vitejs/plugin-react`, `tailwindcss`, `@tailwindcss/vite`, `vitest` | Nothing else |
 
 **Prerequisite:** Node.js 18+ (verified working: Node v26.13.1, npm 11.20.0).
 
@@ -56,7 +58,8 @@ flashcard-app/
 │   ├── App.jsx                # Header, storage-error banner, view switching
 │   ├── index.css              # Tailwind setup, shared button/input styles, flip-card CSS
 │   ├── lib/                   # Pure logic, no React
-│   │   ├── scheduler.js       # SM-2 algorithm + interval previews
+│   │   ├── scheduler.js       # FSRS (ts-fsrs) scheduling + interval previews (v3; was SM-2)
+│   │   ├── migrate.js         # v3: SM-2 → FSRS card migration
 │   │   ├── queue.js           # "Due today" counts and next-card selection
 │   │   ├── storage.js         # localStorage load/save, validate, merge, JSON download
 │   │   ├── sampleDeck.js      # First-run sample deck (World Capitals, 15 cards)
@@ -128,7 +131,7 @@ flashcard-app/
 - **FR-24** A progress indicator shows remaining cards (New / Learning / Review counts).
 - **FR-25** When the queue is empty, show a "Congratulations — you're done for today" screen with the number of cards reviewed.
 
-### 3.5 Spaced-Repetition Algorithm (SM-2, Anki-style)
+### 3.5 Spaced-Repetition Algorithm (SM-2, Anki-style) — *replaced by FSRS in Version 3, see §9*
 Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and swapped for FSRS later.
 
 **Card scheduling fields**
@@ -182,7 +185,7 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
 ---
 
 ## 4. Non-Functional Requirements
-- **NFR-1 Small codebase:** v1 target under ~1,500 lines of source (excluding tests and config); v2 under ~3,000.
+- **NFR-1 Small codebase:** v1 target under ~1,500 lines of source (excluding tests and config); v2 under ~3,000; v3 under ~3,300.
 - **NFR-2 Modular:** algorithm, storage, and parsing logic live in `src/lib/` with no React imports.
 - **NFR-3 Commented:** every file starts with a short header comment; every exported function has a JSDoc comment; the scheduler explains each rule inline.
 - **NFR-4 Performance:** smooth with 10,000 cards (localStorage writes are debounced).
@@ -195,9 +198,9 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
 ## 5. Data Model (export file shape)
 ```json
 {
-  "version": 1,
-  "exportedAt": "2026-11-23T12:00:00.000Z",
-  "settings": { "theme": "system", "newCardsPerDay": 20 },
+  "version": 2,
+  "exportedAt": "2026-11-24T12:00:00.000Z",
+  "settings": { "theme": "system", "newCardsPerDay": 20, "targetRetention": 0.9 },
   "decks": [
     { "id": "d_abc123", "name": "Spanish", "createdAt": 1700000000000, "answerWith": "back" }
   ],
@@ -210,16 +213,21 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
       "createdAt": 1700000000000,
       "state": "review",
       "due": 1700086400000,
-      "interval": 4,
-      "ease": 2.5,
-      "step": 0,
+      "stability": 4.2,
+      "difficulty": 5.1,
+      "elapsed_days": 3,
+      "scheduled_days": 4,
+      "learning_steps": 0,
       "reps": 3,
-      "lapses": 0
+      "lapses": 0,
+      "last_review": 1699740800000
     }
   ],
   "newCardsStudied": { "2026-11-23": { "d_abc123": 5 } }
 }
 ```
+This is the Version 3 shape (`"version": 2`). Versions 1–2 wrote `"version": 1` with SM-2 card fields
+(`interval`, `ease`, `step` instead of the FSRS fields); those are migrated automatically (§9.3).
 
 ---
 
@@ -239,7 +247,7 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
 ---
 
 ## 7. Ideas for later versions (out of scope)
-- FSRS scheduler option, more per-deck settings, configurable day rollover
+- ~~FSRS scheduler~~ (done in v3); FSRS parameter optimization from review history; more per-deck settings; configurable day rollover
 - Separate SRS schedules per study direction; Learn/Test results feeding into SRS
 - Review history log + stats/heatmap
 - Card search, tags, reverse cards, cloze, Markdown/images
@@ -346,4 +354,58 @@ src/components/
 - [ ] A Practice Test respects count, direction, question types, and feedback timing; results show the
       percentage and breakdown; "Retake Missed Questions" re-tests only the misses.
 - [ ] `npm test` and `npm run build` pass.
+
+---
+
+## 9. Version 3 (Part A) Requirements — FSRS Scheduling
+
+### 9.1 FSRS engine
+- **F-1** Scheduling uses the official **`ts-fsrs`** package (FSRS-6 default weights) instead of SM-2.
+  `scheduler.js` is the only module that imports it, and it keeps the same exports (`schedule`,
+  `previewIntervals`, `newCardFields`, `AGAIN/HARD/GOOD/EASY`), so the UI didn't change.
+- **F-2** Same four rating buttons (Again / Hard / Good / Easy, keys 1–4) and live next-interval labels.
+  A new card shows `1m / 6m / 10m / 8d` at 90% retention.
+- **F-3** Learning steps stay `1m, 10m`; the relearning step stays `10m`. Review intervals come from FSRS
+  stability and the Target Retention. The maximum interval is 36,500 days (the ts-fsrs default).
+- **F-4** Fuzz (ts-fsrs) spreads review dates slightly. The button labels show the un-fuzzed value.
+- **F-5** Card `state` is stored as a string (`new` / `learning` / `review` / `relearning`), and dates are
+  stored as ms timestamps. They convert to the ts-fsrs `State` enum and `Date` objects inside `scheduler.js`.
+  The queue, "Cards Due" counts, Learn, and Test logic are unchanged.
+- **F-6** `elapsed_days` (days between the last two reviews) is computed by the app at each review.
+  ts-fsrs v6 no longer tracks it on cards, but it's kept for compatibility with other FSRS tools.
+
+### 9.2 Target Retention setting
+- **R-1** A **Settings** screen (header button) has a **Target Retention** slider:
+  default **90%**, range **85%–97%** in 1% steps. It feeds `request_retention` in the FSRS parameters.
+- **R-2** It shows a live example ("Good" every time → e.g. `2d → 11d → 1.5mo → 5.4mo → 1.4y` at 90%).
+- **R-3** A change applies from the next review; existing due dates aren't rescheduled.
+- **R-4** Invalid stored or imported values are clamped into range. Settings also exposes the existing
+  "New cards per day" limit.
+
+### 9.3 Data migration (Version 2 → Version 3)
+- **M-1** The data format version goes from `1` to `2`. Both localStorage data and imported JSON
+  backups go through the same `validateData → migrateCard` path, so both migrate automatically.
+- **M-2** Progress is preserved: `state`, `due`, `reps`, `lapses`, and the learning step are kept as-is,
+  so no card becomes due earlier or later because of the upgrade.
+- **M-3** Memory estimates:
+  - **Review / relearning cards:** `stability` = SM-2 interval (the interval at 90% recall on FSRS's forgetting
+    curve). `difficulty` is derived from the ease factor using FSRS's stability-growth formula (the same
+    approach FSRS/Anki use for SM-2 cards without review history). Lower ease → higher difficulty.
+  - **Learning cards:** memory state from a first FSRS rating (Again for step 0, Good for step 1).
+  - **New cards:** FSRS empty-card fields.
+  - **`last_review`** is estimated as `due − interval`.
+- **M-4** Migration is **idempotent** (FSRS cards pass through unchanged) and **tolerant**: missing
+  or invalid fields are repaired, and ts-fsrs' numeric `State` and ISO date strings are accepted.
+- **M-5** Safety copy: before the first migration, the original localStorage data is saved once under
+  `flashcards.v1.pre-fsrs-backup` (skipped if storage is full).
+- **M-6** Backups from a newer format version are rejected with a clear message. Version 2 of the app
+  therefore refuses Version 3 backups rather than misreading them.
+
+### 9.4 Acceptance checklist (v3 Part A is done when…)
+- [x] Rating buttons and keyboard shortcuts work as before, with FSRS intervals on the labels.
+- [x] Target Retention (85–97%, default 90%) changes future intervals; higher means shorter intervals.
+- [x] Existing Version 2 localStorage data and backups load with every card's state, due date, reps,
+      and lapses unchanged, and with the FSRS fields filled in.
+- [x] Unit tests cover FSRS interval progression, target retention, and V2 → V3 migration;
+      `npm test` and `npm run build` pass.
 

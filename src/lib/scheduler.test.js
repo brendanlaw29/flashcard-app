@@ -1,77 +1,143 @@
 /**
  * Unit tests for the pure logic in src/lib (run with `npm test`).
+ * FSRS scheduling tests run with fuzz off so intervals are exact.
  */
 import { describe, it, expect } from 'vitest';
-import { schedule, previewIntervals, newCardFields, AGAIN, HARD, GOOD, EASY, CONFIG } from './scheduler.js';
+import {
+  schedule, previewIntervals, newCardFields, exampleGoodIntervals, clampRetention,
+  AGAIN, HARD, GOOD, EASY, DEFAULT_RETENTION,
+} from './scheduler.js';
 import { formatInterval } from './format.js';
 import { parseImport } from './parseImport.js';
 import { countDue, nextCard } from './queue.js';
 import { MINUTE, DAY, addDays } from './time.js';
-import { validateData, mergeData } from './storage.js';
+import { validateData, mergeData, DATA_VERSION } from './storage.js';
 
 const NOW = new Date(2026, 10, 23, 12, 0, 0).getTime(); // local noon
 const card = (fields = {}) => ({ id: 'c1', deckId: 'd1', createdAt: 0, ...newCardFields(NOW), ...fields });
-const labels = (c) => Object.values(previewIntervals(c, NOW)).map(formatInterval);
-const reviewCard = (interval, ease = 2.5) => card({ state: 'review', interval, ease, reps: 3 });
+const labels = (c, retention) => Object.values(previewIntervals(c, NOW, { retention })).map(formatInterval);
+const exact = { fuzz: false };
+/** A review card last reviewed `days` ago with that interval, due now. */
+const reviewCard = (days, stability = days, difficulty = 5) =>
+  card({ state: 'review', stability, difficulty, scheduled_days: days, reps: 3, last_review: NOW - days * DAY, due: NOW });
+/** Rate a card several times, each time exactly when it falls due. */
+function rateRepeatedly(c, rating, times, retention = DEFAULT_RETENTION) {
+  const intervals = [];
+  let t = c.due;
+  for (let i = 0; i < times; i++) {
+    c = schedule(c, rating, t, { retention, fuzz: false });
+    intervals.push(c.state === 'review' ? c.scheduled_days : `${Math.round((c.due - t) / MINUTE)}m`);
+    t = c.due;
+  }
+  return { card: c, intervals };
+}
 
-describe('learning phase', () => {
-  it('shows 1m / 6m / 10m / 4d on a new card', () => {
-    expect(labels(card())).toEqual(['1m', '6m', '10m', '4d']);
+describe('FSRS learning phase', () => {
+  it('keeps the same four buttons and shows 1m / 6m / 10m / 8d on a new card', () => {
+    expect(labels(card())).toEqual(['1m', '6m', '10m', '8d']);
   });
 
-  it('graduates to 1 day after two Good ratings', () => {
-    let c = schedule(card(), GOOD, NOW);
-    expect(c).toMatchObject({ state: 'learning', step: 1, due: NOW + 10 * MINUTE });
-    c = schedule(c, GOOD, NOW);
-    expect(c).toMatchObject({ state: 'review', interval: 1, due: addDays(NOW, 1), reps: 1 });
+  it('graduates to a day-based review after two Good ratings', () => {
+    let c = schedule(card(), GOOD, NOW, exact);
+    expect(c).toMatchObject({ state: 'learning', learning_steps: 1, due: NOW + 10 * MINUTE, reps: 1, last_review: NOW });
+    expect(c.stability).toBeGreaterThan(0);
+    expect(c.difficulty).toBeGreaterThanOrEqual(1);
+    const t = c.due;
+    c = schedule(c, GOOD, t, exact);
+    expect(c.state).toBe('review');
+    expect(c.scheduled_days).toBeGreaterThanOrEqual(1);
+    expect(c.due).toBe(t + c.scheduled_days * DAY);
   });
 
-  it('Again resets to the first step', () => {
-    const c = schedule(card({ state: 'learning', step: 1 }), AGAIN, NOW);
-    expect(c).toMatchObject({ state: 'learning', step: 0, due: NOW + MINUTE });
+  it('Again goes back to the first (1m) step', () => {
+    const learning = schedule(card(), GOOD, NOW, exact);
+    const c = schedule(learning, AGAIN, learning.due, exact);
+    expect(c).toMatchObject({ state: 'learning', learning_steps: 0, due: learning.due + MINUTE });
   });
 
-  it('Easy graduates immediately to 4 days', () => {
-    expect(schedule(card(), EASY, NOW)).toMatchObject({ state: 'review', interval: 4 });
+  it('Easy skips the learning steps', () => {
+    const c = schedule(card(), EASY, NOW, exact);
+    expect(c.state).toBe('review');
+    expect(c.scheduled_days).toBeGreaterThan(1);
+  });
+
+  it('does not mutate the input card', () => {
+    const c = card();
+    const before = { ...c };
+    schedule(c, GOOD, NOW);
+    expect(c).toEqual(before);
   });
 });
 
-describe('review phase', () => {
-  it('Good multiplies the interval by ease', () => {
-    const c = schedule(reviewCard(10), GOOD, NOW, { fuzz: false });
-    expect(c).toMatchObject({ interval: 25, ease: 2.5, due: addDays(NOW, 25) });
+describe('FSRS review phase', () => {
+  it('grows intervals with each successful review', () => {
+    const { intervals, card: c } = rateRepeatedly(card(), GOOD, 7);
+    expect(intervals.slice(0, 1)).toEqual(['10m']);
+    const days = intervals.slice(1);
+    days.forEach((d, i) => i && expect(d).toBeGreaterThan(days[i - 1]));
+    expect(c.reps).toBe(7);
+    expect(c.stability).toBeGreaterThan(30);
   });
 
-  it('keeps Hard < Good < Easy, even for tiny intervals and low ease', () => {
-    for (const c of [reviewCard(1, 1.3), reviewCard(2, 1.3), reviewCard(30, 2.5)]) {
+  it('keeps Again < Hard < Good < Easy on review cards', () => {
+    for (const c of [reviewCard(1, 1, 9), reviewCard(10), reviewCard(60, 60, 2)]) {
       const p = previewIntervals(c, NOW);
-      expect(p[HARD]).toBeGreaterThan(c.interval * DAY);
-      expect(p[GOOD]).toBeGreaterThan(p[HARD]);
-      expect(p[EASY]).toBeGreaterThan(p[GOOD]);
+      expect(p[AGAIN]).toBeLessThan(DAY); // relearning step
+      expect(p[HARD]).toBeLessThan(p[GOOD]);
+      expect(p[GOOD]).toBeLessThan(p[EASY]);
     }
   });
 
-  it('adjusts ease and never drops below the minimum', () => {
-    expect(schedule(reviewCard(10), EASY, NOW, { fuzz: false }).ease).toBeCloseTo(2.65);
-    expect(schedule(reviewCard(10), HARD, NOW, { fuzz: false }).ease).toBeCloseTo(2.35);
-    expect(schedule(reviewCard(10, 1.35), AGAIN, NOW).ease).toBe(CONFIG.minEase);
+  it('a lapse moves the card to relearning for 10m and lowers stability', () => {
+    const before = reviewCard(20);
+    const c = schedule(before, AGAIN, NOW, exact);
+    expect(c).toMatchObject({ state: 'relearning', lapses: 1, due: NOW + 10 * MINUTE });
+    expect(c.stability).toBeLessThan(before.stability);
+    const back = schedule(c, GOOD, c.due, exact);
+    expect(back.state).toBe('review');
+    expect(back.scheduled_days).toBeGreaterThanOrEqual(1);
   });
 
-  it('a lapse relearns for 10m, then returns at half the interval', () => {
-    let c = schedule(reviewCard(10), AGAIN, NOW);
-    expect(c).toMatchObject({ state: 'relearning', lapses: 1, interval: 5, due: NOW + 10 * MINUTE });
-    expect(labels(c)[GOOD - 1]).toBe('5d');
-    c = schedule(c, GOOD, NOW);
-    expect(c).toMatchObject({ state: 'review', interval: 5 });
+  it('records elapsed_days since the previous review', () => {
+    const c = schedule(reviewCard(12), GOOD, NOW, exact);
+    expect(c.elapsed_days).toBe(12);
+    expect(c.last_review).toBe(NOW);
+    expect(schedule(card(), GOOD, NOW, exact).elapsed_days).toBe(0);
   });
 
-  it('caps intervals at the maximum and fuzz stays within ±5%', () => {
-    expect(schedule(reviewCard(300), EASY, NOW, { fuzz: false }).interval).toBe(CONFIG.maxInterval);
-    for (let i = 0; i < 50; i++) {
-      const { interval } = schedule(reviewCard(40), GOOD, NOW); // 100d ± 5
-      expect(interval).toBeGreaterThanOrEqual(95);
-      expect(interval).toBeLessThanOrEqual(105);
+  it('fuzz keeps intervals close to the exact value', () => {
+    const exactDays = schedule(reviewCard(30), GOOD, NOW, exact).scheduled_days;
+    for (let i = 0; i < 40; i++) {
+      const d = schedule(reviewCard(30), GOOD, NOW + i * 1000).scheduled_days;
+      expect(d).toBeGreaterThanOrEqual(Math.floor(exactDays * 0.75));
+      expect(d).toBeLessThanOrEqual(Math.ceil(exactDays * 1.25));
     }
+  });
+});
+
+describe('Target Retention', () => {
+  it('higher retention schedules reviews sooner', () => {
+    const good = (r) => previewIntervals(reviewCard(20), NOW, { retention: r })[GOOD];
+    expect(good(0.85)).toBeGreaterThan(good(0.9));
+    expect(good(0.9)).toBeGreaterThan(good(0.97));
+    const long = rateRepeatedly(card(), GOOD, 5, 0.85).intervals.at(-1);
+    const short = rateRepeatedly(card(), GOOD, 5, 0.97).intervals.at(-1);
+    expect(long).toBeGreaterThan(short * 3);
+  });
+
+  it('does not change the (minute-based) learning steps', () => {
+    expect(labels(card(), 0.85).slice(0, 3)).toEqual(labels(card(), 0.97).slice(0, 3));
+  });
+
+  it('example intervals for Settings increase and depend on retention', () => {
+    const at90 = exampleGoodIntervals(0.9, 4, NOW);
+    expect(at90).toHaveLength(4);
+    at90.forEach((d, i) => i && expect(d).toBeGreaterThan(at90[i - 1]));
+    expect(exampleGoodIntervals(0.97, 4, NOW).at(-1)).toBeLessThan(at90.at(-1));
+  });
+
+  it('clamps retention to 85%–97%', () => {
+    expect([0.5, 0.85, 0.912, 0.99, 'x', undefined].map(clampRetention)).toEqual([0.85, 0.85, 0.91, 0.97, 0.9, 0.9]);
   });
 });
 
@@ -126,7 +192,8 @@ describe('storage', () => {
       cards: [{ id: 'c1', deckId: 'd1', front: 'f', back: 'b' }, { id: 'c2', deckId: 'missing', front: 'f', back: 'b' }],
     });
     expect(data.cards).toHaveLength(1);
-    expect(data.cards[0]).toMatchObject({ state: 'new', ease: 2.5 });
+    expect(data.cards[0]).toMatchObject({ state: 'new', stability: 0, difficulty: 0, reps: 0 });
+    expect(data.version).toBe(DATA_VERSION);
     expect(() => validateData({ hello: 1 })).toThrow();
   });
 
@@ -135,7 +202,17 @@ describe('storage', () => {
     expect(v1.decks[0].answerWith).toBe('back');
     const v2 = validateData({ version: 1, decks: [{ id: 'd1', name: 'A', answerWith: 'front' }], cards: [] });
     expect(v2.decks[0].answerWith).toBe('front');
-    expect(v2.version).toBe(1);
+    expect(v2.version).toBe(2);
+  });
+
+  it('adds a default target retention and clamps bad settings', () => {
+    expect(validateData({ decks: [], cards: [] }).settings.targetRetention).toBe(0.9);
+    const s = validateData({ decks: [], cards: [], settings: { targetRetention: 0.5, newCardsPerDay: -3 } }).settings;
+    expect(s).toMatchObject({ targetRetention: 0.85, newCardsPerDay: 0 });
+  });
+
+  it('rejects backups from a newer app version', () => {
+    expect(() => validateData({ version: DATA_VERSION + 1, decks: [], cards: [] })).toThrow(/newer/);
   });
 
   it('merges only new ids', () => {

@@ -1,167 +1,175 @@
 /**
- * scheduler.js — Anki-style SM-2 spaced repetition.
+ * scheduler.js — FSRS spaced repetition, powered by the official `ts-fsrs` package.
  *
- * Pure functions only (no React, no storage), so the algorithm is easy to
- * test and can later be swapped for FSRS without touching the UI.
+ * FSRS models each card's memory with two numbers:
+ *   - stability:  days until recall probability drops to 90%
+ *   - difficulty: 1 (easy) … 10 (hard), how fast stability grows
+ * and schedules the next review for when recall is expected to fall to your
+ * Target Retention (default 90%). Higher retention = shorter intervals.
  *
- * Card lifecycle:
- *   new ──► learning (short steps: 1m, 10m) ──► review (days, grows by ease)
+ * Card lifecycle (same 4 buttons as before):
+ *   new ──► learning (short steps: 1m, 10m) ──► review (days)
  *                                                  │  ▲
- *                                       Again ▼    │  Good after relearning steps
+ *                                       Again ▼    │  Good after relearning step
  *                                             relearning (10m)
+ *
+ * This module is the only place that talks to ts-fsrs. Cards in the app
+ * store plain JSON (timestamps in ms, `state` as a string), converted to
+ * ts-fsrs' Card objects (Dates, numeric State enum) at this boundary.
+ * Pure functions only: no React, no storage.
  */
 
-import { MINUTE, addDays } from './time.js';
+import { fsrs, generatorParameters, createEmptyCard, Rating, State } from 'ts-fsrs';
+import { DAY } from './time.js';
 
-/** Rating values, matching the 1–4 keyboard shortcuts. */
-export const AGAIN = 1;
-export const HARD = 2;
-export const GOOD = 3;
-export const EASY = 4;
+/** Rating values, matching the 1–4 keyboard shortcuts (same as ts-fsrs' Rating). */
+export const AGAIN = Rating.Again; // 1
+export const HARD = Rating.Hard; //   2
+export const GOOD = Rating.Good; //   3
+export const EASY = Rating.Easy; //   4
 
-/** Default settings. Step lengths are in minutes, intervals in days. */
-export const CONFIG = {
-  learningSteps: [1, 10],
-  relearningSteps: [10],
-  graduatingInterval: 1,
-  easyInterval: 4,
-  startingEase: 2.5,
-  minEase: 1.3,
-  easyBonus: 1.3,
-  hardMultiplier: 1.2,
-  lapseMultiplier: 0.5, // a forgotten card keeps half its interval
-  maxInterval: 365,
-};
+/** Target Retention bounds (fraction of reviews you expect to recall). */
+export const DEFAULT_RETENTION = 0.9;
+export const MIN_RETENTION = 0.85;
+export const MAX_RETENTION = 0.97;
+
+/** Learning steps, unchanged from the SM-2 version so the buttons feel the same. */
+export const LEARNING_STEPS = ['1m', '10m'];
+export const RELEARNING_STEPS = ['10m'];
+export const MAXIMUM_INTERVAL = 36500; // days (ts-fsrs default, ~100 years)
+
+/** App state names ↔ ts-fsrs State enum. */
+const STATE_NAMES = { [State.New]: 'new', [State.Learning]: 'learning', [State.Review]: 'review', [State.Relearning]: 'relearning' };
+const STATE_ENUM = { new: State.New, learning: State.Learning, review: State.Review, relearning: State.Relearning };
+
+/** Keep a retention value inside the supported range (and default if invalid). */
+export function clampRetention(retention) {
+  const r = Number(retention);
+  if (!Number.isFinite(r)) return DEFAULT_RETENTION;
+  return Math.min(MAX_RETENTION, Math.max(MIN_RETENTION, Math.round(r * 100) / 100));
+}
+
+// One ts-fsrs scheduler per (retention, fuzz) combination, created on demand.
+const schedulers = new Map();
+function getScheduler(retention, fuzz) {
+  const r = clampRetention(retention);
+  const key = `${r}:${fuzz}`;
+  if (!schedulers.has(key)) {
+    schedulers.set(
+      key,
+      fsrs(
+        generatorParameters({
+          request_retention: r,
+          enable_fuzz: fuzz, // small randomness so cards added together spread out
+          learning_steps: LEARNING_STEPS,
+          relearning_steps: RELEARNING_STEPS,
+          maximum_interval: MAXIMUM_INTERVAL,
+        }),
+      ),
+    );
+  }
+  return schedulers.get(key);
+}
+
+/** Default FSRS parameters (weights), used by the SM-2 → FSRS migration. */
+export const DEFAULT_WEIGHTS = generatorParameters().w;
 
 /** Scheduling fields for a brand-new card. */
 export function newCardFields(now = Date.now()) {
-  return { state: 'new', due: now, interval: 0, ease: CONFIG.startingEase, step: 0, reps: 0, lapses: 0 };
+  return {
+    state: 'new',
+    due: now,
+    stability: 0,
+    difficulty: 0,
+    elapsed_days: 0, // days between the last two reviews
+    scheduled_days: 0, // interval (days) chosen at the last review
+    learning_steps: 0, // index into the (re)learning steps
+    reps: 0,
+    lapses: 0,
+    last_review: null,
+  };
+}
+
+/** App card (JSON) → ts-fsrs Card. */
+export function toFsrsCard(card) {
+  return {
+    ...createEmptyCard(new Date(card.due)),
+    due: new Date(card.due),
+    stability: card.stability,
+    difficulty: card.difficulty,
+    scheduled_days: card.scheduled_days,
+    learning_steps: card.learning_steps,
+    reps: card.reps,
+    lapses: card.lapses,
+    state: STATE_ENUM[card.state] ?? State.New,
+    last_review: card.last_review != null ? new Date(card.last_review) : undefined,
+  };
+}
+
+/** ts-fsrs Card → the app's scheduling fields. */
+function fromFsrsCard(c) {
+  return {
+    state: STATE_NAMES[c.state],
+    due: c.due.getTime(),
+    stability: c.stability,
+    difficulty: c.difficulty,
+    scheduled_days: c.scheduled_days,
+    learning_steps: c.learning_steps,
+    reps: c.reps,
+    lapses: c.lapses,
+    last_review: c.last_review ? c.last_review.getTime() : null,
+  };
 }
 
 /**
  * Compute a card's scheduling fields after a rating.
  *
- * @param {object} card    Card with state/due/interval/ease/step/reps/lapses.
+ * @param {object} card    App card with FSRS fields.
  * @param {1|2|3|4} rating AGAIN | HARD | GOOD | EASY
  * @param {number} now     Current timestamp (ms).
  * @param {object} [opts]
- * @param {boolean} [opts.fuzz=true] Randomize long intervals slightly.
- * @returns {object} The updated scheduling fields (the input is not mutated).
+ * @param {number} [opts.retention=0.9] Target Retention.
+ * @param {boolean} [opts.fuzz=true]    Randomize review intervals slightly.
+ * @returns {object} The updated card (the input is not mutated).
  */
-export function schedule(card, rating, now = Date.now(), { fuzz = true } = {}) {
-  if (card.state === 'review') return scheduleReview(card, rating, now, fuzz);
-  return scheduleLearning(card, rating, now);
-}
-
-/** New, learning, and relearning cards move through short minute-based steps. */
-function scheduleLearning(card, rating, now) {
-  const relearning = card.state === 'relearning';
-  const steps = relearning ? CONFIG.relearningSteps : CONFIG.learningSteps;
-  const step = Math.min(card.step, steps.length - 1);
-  const stepState = relearning ? 'relearning' : 'learning';
-  const atStep = (i, minutes) => ({ ...card, state: stepState, step: i, due: now + minutes * MINUTE });
-
-  // A relearning card graduates back to its (already reduced) interval;
-  // a new card graduates to the graduating interval.
-  const graduate = (interval) => ({
-    ...card,
-    state: 'review',
-    step: 0,
-    interval,
-    due: addDays(now, interval),
-    reps: card.reps + 1,
-  });
-
-  switch (rating) {
-    case AGAIN:
-      // Back to the first step.
-      return atStep(0, steps[0]);
-
-    case HARD: {
-      // Repeat the current step. On the first step, Anki uses the average of
-      // the first two steps (1m & 10m → ~6m); with a single step, 1.5× it.
-      let minutes = steps[step];
-      if (step === 0) minutes = steps.length > 1 ? (steps[0] + steps[1]) / 2 : steps[0] * 1.5;
-      return atStep(step, minutes);
-    }
-
-    case GOOD:
-      // Advance one step, graduating after the last.
-      if (step + 1 < steps.length) return atStep(step + 1, steps[step + 1]);
-      return graduate(relearning ? card.interval : CONFIG.graduatingInterval);
-
-    case EASY:
-      // Skip the remaining steps.
-      return graduate(relearning ? card.interval + 1 : CONFIG.easyInterval);
-
-    default:
-      throw new Error(`Unknown rating: ${rating}`);
-  }
-}
-
-/** Review cards grow their interval (in days) by the ease factor. */
-function scheduleReview(card, rating, now, fuzz) {
-  const { interval, ease } = card;
-
-  if (rating === AGAIN) {
-    // Lapse: lower ease, halve the interval, and relearn it with short steps.
-    return {
-      ...card,
-      state: 'relearning',
-      step: 0,
-      lapses: card.lapses + 1,
-      ease: Math.max(CONFIG.minEase, ease - 0.2),
-      interval: Math.max(1, Math.round(interval * CONFIG.lapseMultiplier)),
-      due: now + CONFIG.relearningSteps[0] * MINUTE,
-    };
-  }
-
-  // Compute all three so we can guarantee Hard < Good < Easy, each at least
-  // one day longer than the one before.
-  const hard = Math.max(interval + 1, Math.round(interval * CONFIG.hardMultiplier));
-  const good = Math.max(hard + 1, Math.round(interval * ease));
-  const easy = Math.max(good + 1, Math.round(interval * ease * CONFIG.easyBonus));
-
-  const next = { [HARD]: hard, [GOOD]: good, [EASY]: easy }[rating];
-  if (next === undefined) throw new Error(`Unknown rating: ${rating}`);
-
-  const easeChange = { [HARD]: -0.15, [GOOD]: 0, [EASY]: 0.15 }[rating];
-  let days = Math.min(CONFIG.maxInterval, next);
-  if (fuzz) days = applyFuzz(days);
-
+export function schedule(card, rating, now = Date.now(), { retention = DEFAULT_RETENTION, fuzz = true } = {}) {
+  const { card: next } = getScheduler(retention, fuzz).next(toFsrsCard(card), new Date(now), rating);
   return {
     ...card,
-    interval: days,
-    ease: Math.max(CONFIG.minEase, ease + easeChange),
-    due: addDays(now, days),
-    reps: card.reps + 1,
+    ...fromFsrsCard(next),
+    // Whole days since the previous review (0 for a first review).
+    elapsed_days: card.last_review != null ? Math.max(0, Math.floor((now - card.last_review) / DAY)) : 0,
   };
 }
 
 /**
- * Add ±5% randomness (at least ±1 day) to intervals of 3+ days so cards
- * added together don't all come due on the same day forever.
- */
-function applyFuzz(days) {
-  if (days < 3) return days;
-  const range = Math.max(1, Math.round(days * 0.05));
-  const fuzzed = days + Math.round((Math.random() * 2 - 1) * range);
-  return Math.min(CONFIG.maxInterval, Math.max(2, fuzzed));
-}
-
-/**
  * Preview the next interval for each rating button, without changing the card.
- * Returns durations in ms: minute steps for learning, whole days for reviews.
+ * Returns durations in ms: minutes for (re)learning steps, whole days for reviews.
  *
  * @returns {{1: number, 2: number, 3: number, 4: number}}
  */
-export function previewIntervals(card, now = Date.now()) {
+export function previewIntervals(card, now = Date.now(), { retention = DEFAULT_RETENTION } = {}) {
+  const outcomes = getScheduler(retention, false).repeat(toFsrsCard(card), new Date(now));
   const out = {};
   for (const rating of [AGAIN, HARD, GOOD, EASY]) {
-    const next = schedule(card, rating, now, { fuzz: false });
-    // Review cards are due at the start of a day, so report the interval in
-    // days rather than "time until midnight N days from now".
-    out[rating] = next.state === 'review' ? next.interval * 24 * 60 * MINUTE : next.due - now;
+    const next = outcomes[rating].card;
+    out[rating] = next.state === State.Review ? next.scheduled_days * DAY : next.due.getTime() - now;
   }
   return out;
+}
+
+/**
+ * Example intervals (in days) for a new card answered "Good" every time,
+ * used by Settings to show what a Target Retention value means.
+ */
+export function exampleGoodIntervals(retention, count = 5, now = Date.now()) {
+  let card = newCardFields(now);
+  let t = now;
+  const days = [];
+  while (days.length < count) {
+    card = schedule(card, GOOD, t, { retention, fuzz: false });
+    t = card.due;
+    if (card.state === 'review') days.push(card.scheduled_days);
+  }
+  return days;
 }

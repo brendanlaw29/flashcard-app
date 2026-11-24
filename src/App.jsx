@@ -10,6 +10,7 @@ import DeckView from './components/DeckView.jsx';
 import StudySession from './components/StudySession.jsx';
 import LearnMode from './components/LearnMode.jsx';
 import TestMode from './components/TestMode.jsx';
+import SettingsView from './components/SettingsView.jsx';
 import DataMenu from './components/DataMenu.jsx';
 import ThemeToggle, { useApplyTheme } from './components/ThemeToggle.jsx';
 
@@ -18,7 +19,7 @@ export default function App() {
   useApplyTheme(state.settings.theme);
 
   // view: { name: 'home' } | { name: 'deck', deckId } | { name: 'study', deckId | null }
-  //     | { name: 'learn', deckId } | { name: 'test', deckId }
+  //     | { name: 'learn', deckId } | { name: 'test', deckId } | { name: 'settings' }
   const [view, setView] = useState({ name: 'home' });
   const goHome = () => setView({ name: 'home' });
   const openDeck = (deckId) => setView({ name: 'deck', deckId });
@@ -35,8 +36,16 @@ export default function App() {
           <span className="inline-block h-4 w-5 rounded bg-indigo-600" aria-hidden />
           Flashcards
         </button>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center sm:gap-1">
           <DataMenu />
+          <button className="btn-ghost px-2.5" onClick={() => setView({ name: 'settings' })} aria-label="Settings" title="Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+              <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+              <circle cx="16" cy="7" r="2" />
+              <circle cx="10" cy="17" r="2" />
+            </svg>
+            <span className="hidden sm:inline">Settings</span>
+          </button>
           <ThemeToggle />
         </div>
       </header>
@@ -61,6 +70,7 @@ export default function App() {
             onTest={() => setView({ name: 'test', deckId: current.deckId })}
           />
         )}
+        {current.name === 'settings' && <SettingsView onBack={goHome} />}
         {current.name === 'learn' && <LearnMode deckId={current.deckId} onExit={() => openDeck(current.deckId)} />}
         {current.name === 'test' && <TestMode deckId={current.deckId} onExit={() => openDeck(current.deckId)} />}
         {current.name === 'study' && (

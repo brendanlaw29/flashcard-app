@@ -50,7 +50,7 @@ export default function StudySession({ deckId, onExit }) {
   const rate = (rating) => {
     if (!card || !flipped) return;
     const t = Date.now();
-    reviewCard(card, schedule(card, rating, t));
+    reviewCard(card, schedule(card, rating, t, { retention: state.settings.targetRetention }));
     setReviewed((n) => n + 1);
     setFlipped(false);
     setCurrentId(null); // pick the next card on the next render
@@ -112,7 +112,7 @@ export default function StudySession({ deckId, onExit }) {
           <FlipCard key={`${card.id}-${reviewed}-${answerWith}`} front={prompt} back={answer} flipped={flipped} onFlip={flip} />
           <div className="min-h-24">
             {flipped ? (
-              <RatingButtons card={card} now={now} onRate={rate} />
+              <RatingButtons card={card} now={now} retention={state.settings.targetRetention} onRate={rate} />
             ) : (
               <button className="btn-primary w-full py-4 text-base" onClick={flip}>
                 Show answer <span className="kbd border-white/40">Space</span>
