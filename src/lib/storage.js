@@ -77,7 +77,13 @@ export function validateData(input) {
   const isStr = (v) => typeof v === 'string';
   const decks = input.decks
     .filter((d) => d && isStr(d.id) && isStr(d.name))
-    .map((d) => ({ id: d.id, name: d.name, createdAt: Number(d.createdAt) || Date.now() }));
+    .map((d) => ({
+      id: d.id,
+      name: d.name,
+      createdAt: Number(d.createdAt) || Date.now(),
+      // v2: study direction. Missing in v1 backups → default "back" (prompt shows the Front).
+      answerWith: d.answerWith === 'front' ? 'front' : 'back',
+    }));
   const deckIds = new Set(decks.map((d) => d.id));
 
   const cards = input.cards

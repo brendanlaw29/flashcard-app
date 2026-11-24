@@ -1,6 +1,7 @@
 /**
  * DeckView.jsx — one deck: rename/delete it, add cards one at a time or via
- * Quick Import, and browse/edit/delete existing cards.
+ * Quick Import, and browse/edit/delete existing cards. Also the launch point
+ * for the three study modes and the deck's study-direction setting.
  */
 
 import { useMemo, useState } from 'react';
@@ -9,11 +10,12 @@ import { countDue } from '../lib/queue.js';
 import { formatDue } from '../lib/format.js';
 import QuickImport from './QuickImport.jsx';
 import DueCounts from './DueCounts.jsx';
+import { DirectionToggle } from './Segmented.jsx';
 
 const LIST_LIMIT = 200; // keeps the page fast for very large decks
 
-export default function DeckView({ deckId, onBack, onStudy }) {
-  const { state, renameDeck, deleteDeck, addCards, newRemaining } = useStore();
+export default function DeckView({ deckId, onBack, onStudy, onLearn, onTest }) {
+  const { state, renameDeck, deleteDeck, addCards, newRemaining, setDeckAnswerWith } = useStore();
   const deck = state.decks.find((d) => d.id === deckId);
   const cards = useMemo(() => state.cards.filter((c) => c.deckId === deckId), [state.cards, deckId]);
   const due = useMemo(() => countDue(cards, newRemaining, Date.now()), [cards, newRemaining]);
@@ -81,9 +83,6 @@ export default function DeckView({ deckId, onBack, onStudy }) {
               <button className="btn-danger" onClick={remove}>
                 Delete
               </button>
-              <button className="btn-primary ml-1" disabled={!due.total} onClick={onStudy}>
-                Study{due.total ? ` (${due.total})` : ''}
-              </button>
             </div>
           )}
         </div>
@@ -94,6 +93,22 @@ export default function DeckView({ deckId, onBack, onStudy }) {
           <DueCounts counts={due} />
         </p>
       </div>
+
+      {/* Study modes + direction setting */}
+      <section className="panel flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-primary" disabled={!due.total} onClick={onStudy} title="Spaced-repetition review of due cards">
+            Flashcards{due.total ? ` (${due.total} due)` : ''}
+          </button>
+          <button className="btn-secondary" disabled={!cards.length} onClick={onLearn} title="Adaptive rounds until every card is mastered">
+            Learn
+          </button>
+          <button className="btn-secondary" disabled={!cards.length} onClick={onTest} title="Configurable practice test">
+            Practice test
+          </button>
+        </div>
+        <DirectionToggle value={deck.answerWith} onChange={(v) => setDeckAnswerWith(deck.id, v)} />
+      </section>
 
       <AddCardForm onAdd={(card) => addCards(deck.id, [card])} />
 

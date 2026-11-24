@@ -3,6 +3,9 @@
  *
  * Shows one card at a time: flip it (Space), then rate it (1–4). Learning
  * cards rated with short steps (1m, 10m) come back in the same session.
+ *
+ * The direction toggle chooses which side is the prompt. It is display-only:
+ * a card's SM-2 schedule is the same in both directions.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -10,17 +13,21 @@ import { useStore } from '../state/store.jsx';
 import { schedule, GOOD } from '../lib/scheduler.js';
 import { countDue, nextCard, nextLearningLater } from '../lib/queue.js';
 import { formatInterval } from '../lib/format.js';
+import { sides } from '../lib/quiz.js';
 import FlipCard from './FlipCard.jsx';
 import RatingButtons from './RatingButtons.jsx';
 import DueCounts from './DueCounts.jsx';
+import { DirectionToggle } from './Segmented.jsx';
 
 export default function StudySession({ deckId, onExit }) {
-  const { state, reviewCard, newRemaining } = useStore();
+  const { state, reviewCard, newRemaining, setDeckAnswerWith } = useStore();
   const [now, setNow] = useState(Date.now);
   const [flipped, setFlipped] = useState(false);
   const [reviewed, setReviewed] = useState(0);
   // The card on screen is pinned by id, so it never changes while you look at it.
   const [currentId, setCurrentId] = useState(null);
+  // "Study all" only: a session-only direction override (null = use each deck's setting).
+  const [override, setOverride] = useState(null);
 
   // Re-check the clock every 10s so learning cards come back when due.
   useEffect(() => {
@@ -68,7 +75,17 @@ export default function StudySession({ deckId, onExit }) {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  const deckName = deckId ? state.decks.find((d) => d.id === deckId)?.name : 'All decks';
+  const deck = deckId ? state.decks.find((d) => d.id === deckId) : null;
+  const deckName = deck ? deck.name : 'All decks';
+  const cardDeckDirection = card ? state.decks.find((d) => d.id === card.deckId)?.answerWith ?? 'back' : 'back';
+  const answerWith = deck ? deck.answerWith : (override ?? cardDeckDirection);
+  const { prompt, answer } = card ? sides(card, answerWith) : {};
+
+  const changeDirection = (value) => {
+    if (deck) setDeckAnswerWith(deck.id, value);
+    else setOverride(value);
+    setFlipped(false); // show the new prompt side
+  };
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
@@ -79,10 +96,20 @@ export default function StudySession({ deckId, onExit }) {
         {card && <DueCounts counts={counts} />}
       </div>
 
+      {card && (
+        <div className="flex justify-center">
+          <DirectionToggle
+            value={deck ? deck.answerWith : override}
+            onChange={changeDirection}
+            allowDeckSetting={!deck}
+          />
+        </div>
+      )}
+
       {card ? (
         <>
           {/* key forces a fresh, unflipped card (no reverse animation revealing the next answer) */}
-          <FlipCard key={`${card.id}-${reviewed}`} front={card.front} back={card.back} flipped={flipped} onFlip={flip} />
+          <FlipCard key={`${card.id}-${reviewed}-${answerWith}`} front={prompt} back={answer} flipped={flipped} onFlip={flip} />
           <div className="min-h-24">
             {flipped ? (
               <RatingButtons card={card} now={now} onRate={rate} />

@@ -130,6 +130,14 @@ describe('storage', () => {
     expect(() => validateData({ hello: 1 })).toThrow();
   });
 
+  it('keeps v1 backups compatible with the v2 study direction', () => {
+    const v1 = validateData({ version: 1, decks: [{ id: 'd1', name: 'A' }], cards: [] });
+    expect(v1.decks[0].answerWith).toBe('back');
+    const v2 = validateData({ version: 1, decks: [{ id: 'd1', name: 'A', answerWith: 'front' }], cards: [] });
+    expect(v2.decks[0].answerWith).toBe('front');
+    expect(v2.version).toBe(1);
+  });
+
   it('merges only new ids', () => {
     const a = validateData({ decks: [{ id: 'd1', name: 'A' }], cards: [{ id: 'c1', deckId: 'd1', front: 'x', back: 'y' }] });
     const b = validateData({

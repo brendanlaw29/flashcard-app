@@ -29,7 +29,7 @@ export function sampleData(now = Date.now()) {
   return {
     version: DATA_VERSION,
     settings: { ...defaultSettings },
-    decks: [{ id: deckId, name: 'Sample: World Capitals', createdAt: now }],
+    decks: [{ id: deckId, name: 'Sample: World Capitals', createdAt: now, answerWith: 'back' }],
     cards: CAPITALS.map(([country, capital], i) => ({
       id: `c_sample${i}`,
       deckId,

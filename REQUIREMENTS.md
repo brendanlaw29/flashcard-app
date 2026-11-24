@@ -1,6 +1,7 @@
-# Flashcard App — Version 1 Requirements
+# Flashcard App — Requirements (Version 1 + Version 2)
 
 A modern, local-first flashcard web app with Anki-style spaced repetition.
+Version 2 adds a study-direction setting plus Quizlet-style **Learn** and **Practice Test** modes (see §8).
 No backend, no database, no accounts. All data lives in the browser.
 
 ---
@@ -181,7 +182,7 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
 ---
 
 ## 4. Non-Functional Requirements
-- **NFR-1 Small codebase:** target under ~1,500 lines of source (excluding tests and config).
+- **NFR-1 Small codebase:** v1 target under ~1,500 lines of source (excluding tests and config); v2 under ~3,000.
 - **NFR-2 Modular:** algorithm, storage, and parsing logic live in `src/lib/` with no React imports.
 - **NFR-3 Commented:** every file starts with a short header comment; every exported function has a JSDoc comment; the scheduler explains each rule inline.
 - **NFR-4 Performance:** smooth with 10,000 cards (localStorage writes are debounced).
@@ -198,7 +199,7 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
   "exportedAt": "2026-11-23T12:00:00.000Z",
   "settings": { "theme": "system", "newCardsPerDay": 20 },
   "decks": [
-    { "id": "d_abc123", "name": "Spanish", "createdAt": 1700000000000 }
+    { "id": "d_abc123", "name": "Spanish", "createdAt": 1700000000000, "answerWith": "back" }
   ],
   "cards": [
     {
@@ -237,8 +238,112 @@ Implemented as **pure functions** in `scheduler.js` so it can be unit-tested and
 
 ---
 
-## 7. Ideas for v2 (out of scope)
-- FSRS scheduler option, per-deck settings, configurable day rollover
+## 7. Ideas for later versions (out of scope)
+- FSRS scheduler option, more per-deck settings, configurable day rollover
+- Separate SRS schedules per study direction; Learn/Test results feeding into SRS
 - Review history log + stats/heatmap
 - Card search, tags, reverse cards, cloze, Markdown/images
 - PWA install + optional cloud sync
+
+---
+
+## 8. Version 2 Requirements
+
+V2 builds on the v1 decks, cards, and localStorage schema. **Nothing in v1 changes behavior**:
+the SM-2 "Study Due Cards" mode, its keyboard shortcuts, and the JSON backup format keep working.
+
+### 8.1 Compatibility rules
+- **C-1** The backup format stays `"version": 1`. V2 only adds one optional deck field,
+  `answerWith` (`"back"` default, or `"front"`). V1 backups import into v2 (missing field → `"back"`),
+  and v2 backups import into v1 (unknown field is ignored).
+- **C-2** Learn and Practice Test are **practice modes**: they never change a card's SM-2 schedule.
+  Only "Study Due Cards" (Flashcards) rates cards and schedules reviews.
+- **C-3** Learn progress is saved separately under the `flashcards.learn.v1` localStorage key, so it
+  survives reloads but is not part of backups (it is cheap to rebuild by learning again).
+- **C-4** Study direction is a display choice. A card has one SM-2 schedule no matter which side is shown.
+
+### 8.2 Study Direction ("Answer with Back" / "Answer with Front")
+- **D-1** Each deck has a direction setting, shown as a toggle on the deck page:
+  - **Answer with Back** (default): the prompt shows the Front; you recall the Back.
+  - **Answer with Front**: the prompt shows the Back/definition; you recall the Front/term.
+- **D-2** The same toggle appears at the start of every session: Flashcards (in the session header),
+  Learn (start screen), and Practice Test (setup screen). Changing it there also updates the deck's setting.
+- **D-3** "Study all due cards" (several decks) uses each deck's own setting by default, with a
+  session-only override (Deck setting / Answer with Back / Answer with Front).
+- **D-4** In Flashcards, the flip animation and all keyboard shortcuts (Space, 1–4, Esc) work the same in
+  both directions. The answer side repeats the prompt above the answer.
+
+### 8.3 Learn Mode (adaptive, Quizlet-style)
+- **L-1** Learn works through a deck in **rounds** of up to 7 cards until every card is **Mastered**.
+- **L-2** Each card has a level: **Remaining** (unseen or struggling) → **Familiar** → **Mastered**.
+  - Remaining cards are asked as **4-option multiple choice**.
+  - A correct multiple-choice answer promotes the card to Familiar. A Familiar card is asked as a
+    **written** (typed) prompt in a **later round**, never the same round.
+  - A correct written answer marks the card Mastered.
+- **L-3** Each round fills up with Familiar cards first, then struggling cards, then unseen cards in deck order.
+  The round order is shuffled.
+- **L-4** A wrong answer:
+  - immediately shows the correct answer;
+  - multiple choice: highlights the right option, and you press **Continue** (Enter) to acknowledge it;
+  - written: you must **re-type the correct answer** to continue, or press **"Override: I was right"**
+    for a typo, which counts the answer as correct;
+  - drops the card back to Remaining and **re-queues it 2 questions later** in the same round.
+- **L-5** **Distractors**: three wrong options come from other cards in the same deck, preferring answers
+  of similar length and kind (numbers vs. words), with some randomness. Duplicates of the correct answer
+  are never shown. If the deck has too few cards, options come from other decks; if there still aren't
+  enough, fewer options are shown. If no distractor exists at all, the card is asked as a written prompt.
+- **L-6** Written answers are checked ignoring case, accents, punctuation, and extra spaces
+  ("brasilia" matches "Brasília").
+- **L-7** A live **progress bar** shows Remaining / Familiar / Mastered counts. A round summary appears
+  between rounds, and a completion screen offers "Learn again".
+- **L-8** Keyboard: `1`–`4` choose an option, `Enter` submits or continues, `Esc` exits.
+- **L-9** Progress is saved per deck and direction. Cards added later join as Remaining; deleted cards are dropped.
+
+### 8.4 Practice Test Mode
+- **T-1** A setup screen configures:
+  - **Question count**: 1 up to the deck size (default: min(20, deck size));
+  - **Direction**: Answer with Back / Answer with Front;
+  - **Question types**: any combination of Multiple Choice, Written, and True/False (at least one);
+  - **Feedback timing**:
+    - **Instant feedback**: each answer locks when given, then shows right/wrong and highlights the
+      correct answer if wrong;
+    - **Grade at end**: answers stay editable until **Submit Test**.
+- **T-2** Questions are random cards from the deck, with the chosen types spread evenly. A True/False
+  question pairs the prompt with either the real answer or a distractor (50/50). A multiple-choice or
+  True/False question that can't get a distractor becomes Written.
+- **T-3** Submitting with unanswered questions asks for confirmation; unanswered questions count as wrong.
+- **T-4** The results screen shows the **percentage score**, the correct count, and a **breakdown** of every
+  question (prompt, your answer, correct answer, right/wrong).
+- **T-5** **Retake Missed Questions** builds a new test from only the missed cards, with the same settings.
+  **New test** returns to setup.
+
+### 8.5 Updated file structure (additions)
+```
+src/lib/
+  quiz.js              # Prompt/answer sides, answer checking, distractors, shuffle
+  learn.js             # Learn-mode rounds and level progression (pure)
+  learnStore.js        # Saves Learn progress under its own localStorage key
+  practiceTest.js      # Builds and grades practice tests (pure)
+  quiz.test.js, learn.test.js, practiceTest.test.js, testUtils.js (seeded random for tests)
+src/components/
+  Segmented.jsx        # Segmented control + DirectionToggle
+  Choice.jsx           # Multiple-choice / True-False option button
+  ProgressBar.jsx      # Remaining / Familiar / Mastered bar
+  LearnMode.jsx        # Learn start screen, question loop, round summary
+  TestMode.jsx         # Practice-test controller (setup → taking → results)
+  TestSetup.jsx, TestQuestion.jsx, TestResults.jsx
+```
+
+### 8.6 Acceptance Checklist (v2 is done when…)
+- [ ] All v1 checklist items still pass; an exported v1 backup imports into v2 unchanged.
+- [ ] Switching a deck to "Answer with Front" shows the Back first in Flashcards, Learn, and Test, and
+      Space/1–4 still work.
+- [ ] In Learn, a new card is asked as multiple choice. After a correct answer, it is asked as written in a
+      later round, then becomes Mastered.
+- [ ] A missed card shows the answer, needs a re-type or acknowledgment, and comes back 2 questions later.
+- [ ] "Override: I was right" counts a typo as correct.
+- [ ] A 3-card deck still gets multiple-choice options (taken from other decks, or fewer options).
+- [ ] A Practice Test respects count, direction, question types, and feedback timing; results show the
+      percentage and breakdown; "Retake Missed Questions" re-tests only the misses.
+- [ ] `npm test` and `npm run build` pass.
+

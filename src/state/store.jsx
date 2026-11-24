@@ -19,8 +19,8 @@ function reducer(state, action) {
     case 'addDeck':
       return { ...state, decks: [...state.decks, action.deck] };
 
-    case 'renameDeck':
-      return { ...state, decks: state.decks.map((d) => (d.id === action.id ? { ...d, name: action.name } : d)) };
+    case 'updateDeck':
+      return { ...state, decks: state.decks.map((d) => (d.id === action.id ? { ...d, ...action.fields } : d)) };
 
     case 'deleteDeck':
       return {
@@ -100,11 +100,13 @@ export function StoreProvider({ children }) {
       newRemaining,
 
       addDeck(name) {
-        const deck = { id: uid('d'), name: name.trim(), createdAt: Date.now() };
+        const deck = { id: uid('d'), name: name.trim(), createdAt: Date.now(), answerWith: 'back' };
         dispatch({ type: 'addDeck', deck });
         return deck.id;
       },
-      renameDeck: (id, name) => dispatch({ type: 'renameDeck', id, name: name.trim() }),
+      renameDeck: (id, name) => dispatch({ type: 'updateDeck', id, fields: { name: name.trim() } }),
+      /** Set a deck's study direction: 'back' (prompt shows Front) or 'front' (prompt shows Back). */
+      setDeckAnswerWith: (id, answerWith) => dispatch({ type: 'updateDeck', id, fields: { answerWith } }),
       deleteDeck: (id) => dispatch({ type: 'deleteDeck', id }),
 
       /** Add cards ({front, back}[]) to a deck as new cards. */
